@@ -1,202 +1,341 @@
-from flask import Flask, request, render_template
-import os
+import streamlit as st
+import pandas as pd
+import pdfplumber
+import docx
 import re
-import PyPDF2
-import docx2txt
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import plotly.graph_objects as go
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.pagesizes import letter
+from io import BytesIO
+import os
+import json
+from datetime import datetime
+from xml.sax.saxutils import escape
+import bcrypt   
 
-# ---------------------------- TEXT EXTRACTION ---------------------------- #
+st.set_page_config(page_title="PathFinder", layout="wide", page_icon="🧠")
 
-def extract_text_pdf(file_path):
-    text = ""
-    with open(file_path,'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + " "
-    return text
 
-def extract_text_docs(file_path):
-    try:
-        return docx2txt.process(file_path) or ""
-    except Exception:
-        return ""
+# -------------------------------------
+# PERSISTENT STORAGE (JSON FILE)
+# -------------------------------------
+USERS_FILE = "users.json"
 
-def extract_text_txt(file_path):
-    try:
-        with open(file_path,'r',encoding='utf-8') as file:
-            return file.read()
-    except Exception:
-        return ""
 
-def extract_text(file_path):
-    file_path = file_path.lower()
-    if file_path.endswith('.pdf'):
-        return extract_text_pdf(file_path)
-    elif file_path.endswith('.docx'):
-        return extract_text_docs(file_path)
-    elif file_path.endswith('.txt'):
-        return extract_text_txt(file_path)
+def load_users_file():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            os.rename(USERS_FILE, USERS_FILE + ".bak")
+            return {}
+    return {}
+
+
+def save_users_file(data):
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+# Initialize session state
+if "users" not in st.session_state:
+    st.session_state.users = load_users_file()
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+
+
+# -------------------------------------
+# AUTHENTICATION (WITH HASHING)
+# -------------------------------------
+def hash_password(password: str) -> str:
+    """Hash password using bcrypt."""
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify password against stored hash."""
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def auth_page():
+    st.title("🔐 Login / Register")
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
+
+    # LOGIN
+    with tab1:
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
+
+        if st.button("Login"):
+            users = st.session_state.users
+
+            if username in users:
+                stored_hash = users[username]["password"]
+
+                if verify_password(password, stored_hash):
+                    st.session_state.logged_in = True
+                    st.session_state.current_user = username
+                    st.success("Login successful!")
+                    st.rerun()
+                else:
+                    st.error("Incorrect password!")
+            else:
+                st.error("User not found!")
+
+    # REGISTER
+    with tab2:
+        new_user = st.text_input("New Username", key="reg_user")
+        new_pass = st.text_input("New Password", type="password", key="reg_pass")
+
+        if st.button("Register"):
+            if not new_user:
+                st.error("Please enter a username")
+            elif new_user in st.session_state.users:
+                st.error("Username already exists!")
+            else:
+                hashed_password = hash_password(new_pass)
+
+                st.session_state.users[new_user] = {
+                    "password": hashed_password,
+                    "history": [],
+                    "profile_url": "https://cdn-icons-png.flaticon.com/512/3177/3177440.png"
+                }
+
+                save_users_file(st.session_state.users)
+                st.success("Account created! You can now login.")
+
+
+# If not logged in → show auth
+if not st.session_state.logged_in:
+    auth_page()
+    st.stop()
+
+
+# -------------------------------------
+# SIDEBAR PROFILE + HISTORY + LOGOUT
+# -------------------------------------
+def logout():
+    st.session_state.logged_in = False
+    st.session_state.current_user = None
+    st.rerun()
+
+
+with st.sidebar:
+    curr_user = st.session_state.current_user
+    data = st.session_state.users[curr_user]
+
+    st.markdown("### 👤 Profile")
+    st.image(data["profile_url"], width=80)
+    st.write(f"**Username:** `{curr_user}`")
+
+    st.markdown("---")
+    st.markdown("### 📜 My History")
+
+    history = data.get("history", [])
+
+    if not history:
+        st.write("No history yet.")
     else:
-        return ""
+        for h in reversed(history[-50:]):
+            with st.expander(f"{h['timestamp']} — {h['match']}% match"):
+                st.write("**Resume Skills:**", ", ".join(h["resume"]))
+                st.write("**Job Skills:**", ", ".join(h["job"]))
+                st.write("**Missing:**", ", ".join(h["missing"]))
 
-# ---------------------------- SKILL EXTRACTION (ROBUST) ---------------------------- #
+    st.markdown("---")
+    if st.button("Clear My History"):
+        st.session_state.users[curr_user]["history"] = []
+        save_users_file(st.session_state.users)
+        st.success("History cleared.")
+        st.rerun()
 
-# A mapping from canonical skill -> list of regex patterns that should match it.
-SKILL_PATTERNS = {
-    "python": [r"\bpython\b"],
-    "java": [r"\bjava\b"],
-    "c++": [r"\bc\+\+\b"],
-    "c#": [r"\bc#\b", r"\bc sharp\b"],
-    "sql": [r"\bsql\b", r"\bstructured query language\b"],
-    "html": [r"\bhtml\b"],
-    "css": [r"\bcss\b"],
-    "javascript": [r"\bjavascript\b", r"\bjs\b"],
-    "react": [r"\breact\b", r"\breactjs\b", r"\breact.js\b"],
-    "node": [r"\bnode\b", r"\bnodejs\b", r"\bnode\.js\b"],
-    "flask": [r"\bflask\b"],
-    "django": [r"\bdjango\b"],
-    "machine learning": [r"\bmachine learning\b", r"\bml\b"],
-    "deep learning": [r"\bdeep learning\b", r"\bdl\b"],
-    "nlp": [r"\bnlp\b", r"\bnatural language processing\b"],
-    "tensorflow": [r"\btensorflow\b"],
-    "keras": [r"\bkeras\b"],
-    "data analysis": [r"\bdata analysis\b", r"\bdata analyst\b", r"\bdata analytics\b"],
-    "power bi": [r"\bpower bi\b", r"\bpowerbi\b"],
-    "excel": [r"\bexcel\b"],
-    "communication": [r"\bcommunication\b", r"\bcommunicative\b"],
-    "leadership": [r"\bleadership\b", r"\bleader\b"],
-    "git": [r"\bgit\b"],
-    "linux": [r"\blinux\b"],
-    "cloud": [r"\bcloud\b"],
-    "aws": [r"\baws\b", r"\bamazon web services\b"],
-    "azure": [r"\bazure\b", r"\bmicrosoft azure\b"],
-    "docker": [r"\bdocker\b"],
-    "kubernetes": [r"\bkubernetes\b", r"\bk8s\b"],
-    "react native": [r"\breact native\b"],
-    "rest api": [r"\brest api\b", r"\brestful\b", r"\bapi\b"],
-    "opencv": [r"\bopencv\b"],
-    "pandas": [r"\bpandas\b"],
-    "numpy": [r"\bnumpy\b"],
-    "matplotlib": [r"\bmatplotlib\b"],
-    "scikit-learn": [r"\bscikit[- ]?learn\b", r"\bsklearn\b"],
-    "excel vba": [r"\bvba\b", r"\bexcel vba\b"]
-}
+    st.markdown("---")
+    if st.button("Logout"):
+        logout()
 
-# Compile patterns to regex objects once
-_COMPILED_SKILLS = {
-    skill: [re.compile(pat, flags=re.IGNORECASE) for pat in pats]
-    for skill, pats in SKILL_PATTERNS.items()
-}
 
-def normalize_text_for_skills(text: str) -> str:
-    if not text:
-        return ""
-    # Replace common separators with spaces, keep + and # for C++/C#
-    text = re.sub(r"[\n\r\t,;/\(\)\[\]\{\}:<>\-]", " ", text)
-    # Convert multiple spaces to single
-    text = re.sub(r"\s+", " ", text)
-    return text.strip().lower()
+# -------------------------------------
+# PathFinder LOGIC (UNCHANGED)
+# -------------------------------------
 
-def extract_skills(text: str):
-    """
-    Return a set of canonical skills found in the text using regex patterns.
-    This function is robust to punctuation, capitalization, and short-hands.
-    """
-    text_norm = normalize_text_for_skills(text)
-    found = set()
-    for skill, patterns in _COMPILED_SKILLS.items():
-        for pat in patterns:
-            if pat.search(text_norm):
-                found.add(skill)
-                break
-    return found
+skill_keywords = [
+    'python', 'java', 'c++', 'sql', 'machine learning', 'deep learning',
+    'data analysis', 'data visualization', 'excel', 'tableau', 'power bi',
+    'communication', 'teamwork', 'leadership', 'cloud', 'aws', 'azure',
+    'react', 'javascript', 'node', 'html', 'css', 'nlp', 'statistics'
+]
 
-# ---------------------------- FLASK APP ---------------------------- #
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads/'
+@st.cache_data
+def load_courses():
+    coursera = pd.read_csv("datasets/coursera.csv")
+    udemy = pd.read_csv("datasets/udemy.csv")
+    return coursera, udemy
 
-@app.route('/')
-def matchresume():
-    return render_template("app.html") 
 
-@app.route('/upload', methods=['POST'])
-def upload():
-    # support both names: 'resumeText' (existing) and 'jobDescription' (safe fallback)
-    jd = request.form.get('resumeText') or request.form.get('jobDescription') or ""
-    resume_files = request.files.getlist('resumeFile')
+coursera, udemy = load_courses()
 
-    resumes = []
-    resume_names = []
 
-    # save and extract text from uploaded resumes
-    for resume_file in resume_files:
-        # skip empty filenames
-        if not resume_file or resume_file.filename == "":
-            continue
-        safe_name = os.path.basename(resume_file.filename)
-        filename = os.path.join(app.config['UPLOAD_FOLDER'], safe_name)
-        # ensure upload folder exists
-        if not os.path.exists(app.config['UPLOAD_FOLDER']):
-            os.makedirs(app.config['UPLOAD_FOLDER'])
-        resume_file.save(filename)
-        text = extract_text(filename) or ""
-        resumes.append(text)
-        resume_names.append(safe_name)
+def extract_skills(text):
+    text = str(text).lower()
+    return list({s for s in skill_keywords if re.search(r'\b' + re.escape(s) + r'\b', text)})
 
-    if len(resumes) == 0 or not jd.strip():
-        return render_template(
-            'app.html',
-            message="Please upload at least one resume and enter a job description"
-        )
 
-    # TF–IDF vectorizing (JD + resumes)
-    vec = TfidfVectorizer().fit_transform([jd] + resumes)
-    vectors = vec.toarray()
+def extract_text_from_pdf(file):
+    with pdfplumber.open(file) as pdf:
+        return " ".join([page.extract_text() or "" for page in pdf.pages])
 
-    jd_vec = vectors[0]
-    resume_vecs = vectors[1:]
 
-    sim = cosine_similarity([jd_vec], resume_vecs)[0]
+def extract_text_from_docx(file):
+    doc_file = docx.Document(file)
+    return " ".join([para.text for para in doc_file.paragraphs])
 
-    # Convert to percentage 0-100
-    percentage_scores = [round(float(score) * 100, 2) for score in sim]
 
-    # Get top 3 indexes (safe if fewer than 3 resumes)
-    n = len(sim)
-    top_k = min(3, n)
-    top_indexes = sim.argsort()[-top_k:][::-1]
+def suggest_courses(missing_skills):
+    suggestions = []
 
-    top_resumes = [resume_names[i] for i in top_indexes]
-    top_scores = [percentage_scores[i] for i in top_indexes]
+    for skill in missing_skills:
+        c = coursera[coursera['course_title'].str.contains(skill, case=False, na=False)]
+        u = udemy[udemy['course_title'].str.contains(skill, case=False, na=False)]
+        coursera_url = f"https://www.coursera.org/search?query={skill}"
+        udemy_url = f"https://www.udemy.com/courses/search/?q={skill}"
 
-    # Skill Recommendations
-    jd_skills = extract_skills(jd)
-    resume_skills_list = [extract_skills(r) for r in resumes]
+        if not c.empty:
+            row = c.iloc[0]
+            suggestions.append({
+                "Skill": skill,
+                "Platform": "Coursera",
+                "Course": row["course_title"],
+                "URL": coursera_url
+            })
+        elif not u.empty:
+            row = u.iloc[0]
+            suggestions.append({
+                "Skill": skill,
+                "Platform": "Udemy",
+                "Course": row["course_title"],
+                "URL": udemy_url
+            })
 
-    # Build recommendations aligned to top indexes
-    recommendations = []
-    for i in top_indexes:
-        missing = sorted(list(jd_skills - resume_skills_list[i]))
-        extra = sorted(list(resume_skills_list[i] - jd_skills))
-        recommendations.append({
-            "missing": missing,
-            "extra": extra
-        })
+    return pd.DataFrame(suggestions)
 
-    return render_template(
-        'app.html',
-        message="Top matching resumes:",
-        top_r=top_resumes,
-        similarity_scores=top_scores,
-        recommendations=recommendations
+
+def generate_pdf(resume_skills, job_skills, matched, missing, match_percent, course_df):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("<b>PathFinder Report</b>", styles['Title']))
+    story.append(Paragraph(f"<b>Match Percentage:</b> {match_percent}%", styles['Heading2']))
+    story.append(Paragraph("<b>Resume Skills:</b> " + ", ".join(resume_skills), styles['BodyText']))
+    story.append(Paragraph("<b>Job Required Skills:</b> " + ", ".join(job_skills), styles['BodyText']))
+    story.append(Paragraph("<b>Matched Skills:</b> " + ", ".join(matched), styles['BodyText']))
+    story.append(Paragraph("<b>Missing Skills:</b> " + ", ".join(missing), styles['BodyText']))
+
+    story.append(Paragraph("<br/><b>Recommended Courses:</b>", styles['Heading2']))
+
+    if not course_df.empty:
+        for _, row in course_df.iterrows():
+            story.append(Paragraph(
+                f"<b>{row['Skill']}</b> — {row['Course']} ({row['Platform']})<br/>{escape(row['URL'])}<br/><br/>",
+                styles['BodyText'],
+            ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+
+# -------------------------------------
+# MAIN UI
+# -------------------------------------
+st.markdown("<h1 style='text-align:center;color:#1f4e79;'>🧠PathFinderr — Resume & Job Match Analyzer</h1>",
+            unsafe_allow_html=True)
+
+uploaded_file = st.file_uploader("📄 Upload Resume (PDF or Word)", type=["pdf", "docx"])
+job_description = st.text_area("💼 Paste Job Description here", height=160)
+
+
+if uploaded_file and job_description:
+
+    resume_text = (
+        extract_text_from_pdf(uploaded_file)
+        if uploaded_file.type == "application/pdf"
+        else extract_text_from_docx(uploaded_file)
     )
 
+    resume_skills = extract_skills(resume_text)
+    job_skills = extract_skills(job_description)
 
-if __name__ == '__main__':
-    if not os.path.exists(app.config['UPLOAD_FOLDER']):
-        os.makedirs(app.config['UPLOAD_FOLDER'])
-    app.run(debug=True)
+    matched_skills = list(set(resume_skills) & set(job_skills))
+    missing_skills = list(set(job_skills) - set(resume_skills))
+
+    match_percent = round((len(matched_skills) / len(job_skills) * 100), 2) if job_skills else 0
+
+    st.subheader(f"🎯 Skill Match: {match_percent}%")
+    st.progress(match_percent / 100 if job_skills else 0)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("### 📄 Resume Skills")
+        st.dataframe(pd.DataFrame({"Resume Skills": resume_skills}))
+
+    with col2:
+        st.write("### 💼 Job Skills")
+        st.dataframe(pd.DataFrame({"Job Skills": job_skills}))
+
+    fig = go.Figure(data=[
+        go.Bar(name='Resume', x=['Skills'], y=[len(resume_skills)]),
+        go.Bar(name='Job', x=['Skills'], y=[len(job_skills)]),
+        go.Bar(name='Matched', x=['Skills'], y=[len(matched_skills)])
+    ])
+    fig.update_layout(barmode='group')
+    st.plotly_chart(fig, use_container_width=True)
+
+    pie = go.Figure(data=[go.Pie(
+        labels=["Matched", "Missing"],
+        values=[len(matched_skills), len(missing_skills)],
+        hole=0.3
+    )])
+    st.plotly_chart(pie, use_container_width=True)
+
+    course_df = suggest_courses(missing_skills)
+
+    if not course_df.empty:
+        st.write("### 📘 Recommended Courses")
+        st.dataframe(course_df)
+    else:
+        st.success("🎉 All required skills matched!")
+
+    pdf_buffer = generate_pdf(
+        resume_skills, job_skills, matched_skills, missing_skills, match_percent, course_df
+    )
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    entry = {
+        "timestamp": timestamp,
+        "match": match_percent,
+        "resume": resume_skills,
+        "job": job_skills,
+        "missing": missing_skills,
+    }
+
+    st.session_state.users[curr_user]["history"].append(entry)
+    save_users_file(st.session_state.users)
+
+    st.download_button(
+        "📥 Download PDF Report",
+        pdf_buffer,
+        file_name=f"PathFinder_Report_{curr_user}_{timestamp.replace(':','-').replace(' ','_')}.pdf",
+        mime="application/pdf"
+    )
