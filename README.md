@@ -1,8 +1,8 @@
 
 
-# Resume Analyzer
+# PathFinder Resume Analyzer (Infosys Springboard Virtual Internship 6.0)
 
-**Resume Analyzer** is a prototype web application that allows users to upload multiple resumes and compare them against a job description using vectorization and cosine similarity. The project is built using Python, Flask, and scikit-learn. It can also be enhanced using machine learning models for better efficiency and accuracy — work on this is in progress.
+**PathFinder** is a prototype web application that allows users to upload multiple resumes and compare them against a job description using vectorization and cosine similarity. The project is built using Python, Flask, and scikit-learn. It can also be enhanced using machine learning models for better efficiency and accuracy.
 
 ---
 
@@ -17,16 +17,6 @@
 
 ---
 
-## APP Interface
-
-![App Interface](https://github.com/SeekAI-786/Resume-Analyzer/blob/main/r2.png)
-
----
-
-![App Interface](https://github.com/SeekAI-786/Resume-Analyzer/blob/main/r1.png)
-
-
----
 ## How It Works
 
 1. Users input a job description and upload up to 10 resumes.
@@ -50,8 +40,8 @@
 ### Installation
 
 ```bash
-git clone https://github.com/your-username/resume-analyzer.git
-cd resume-analyzer
+git clone https://github.com/saransh9714/PathFinder-Resume-Matcher.git
+cd Pathfinder-Resume-Matcher
 pip install -r requirements.txt
 ```
 
@@ -91,8 +81,8 @@ Contributions are welcome.
 
 ## Tech Stack
 
-- **Frontend**: HTML, CSS (with customization options)
-- **Backend**: Python Flask
+- **Frontend**: Streamlit
+- **Backend**: Python
 - **Text Processing**: TF-IDF, Cosine Similarity
 - **File Parsing**: PyPDF2, docx2txt
 
@@ -103,7 +93,3 @@ Contributions are welcome.
 This is a prototype and may not handle every edge case. It serves as a proof-of-concept for resume screening and ranking based on textual similarity. For production use, improvements in model robustness and user interface are recommended.
 
 ---
-
-## License
-
-MIT License
